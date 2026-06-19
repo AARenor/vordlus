@@ -3,10 +3,10 @@
 
 import type { CadastreRecord, EhrBuilding } from "./estdata";
 import type { Lifestyle } from "./lifestyle";
+import type { PropertyScores } from "./scores";
 
 export type CompareInput = {
   raw: string;
-  // Optional manual listing metadata (since we don't scrape kv.ee)
   manualPrice?: number | null;
   manualArea?: number | null;
   manualRooms?: number | null;
@@ -18,6 +18,7 @@ export type CompareColumn = {
   cadastre: CadastreRecord | null;
   ehr: EhrBuilding | null;
   lifestyle: Lifestyle;
+  scores: PropertyScores; // 4-score evaluation
   fetchedAt: number;
   errors: string[];
 };
@@ -68,4 +69,24 @@ export function decodeShareUrl(b64: string): string[] {
   } catch {
     return [];
   }
+}
+
+// Default scores — used while data is loading
+import { computeScores } from "./scores";
+
+export function defaultScores(): PropertyScores {
+  return computeScores({
+    c: null,
+    e: null,
+    lifestyle: {
+      park: { stars: 0, label: "—", count: 0 },
+      school: { stars: 0, label: "—", count: 0 },
+      gym: { stars: 0, label: "—", count: 0 },
+      transit: { stars: 0, label: "—", count: 0 },
+      shop: { stars: 0, label: "—", count: 0 },
+      cafe: { stars: 0, label: "—", count: 0 },
+      restaurant: { stars: 0, label: "—", count: 0 },
+    },
+    marketMedian: null,
+  });
 }

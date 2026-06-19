@@ -1,7 +1,7 @@
 "use client";
 
 import { type CompareColumn } from "@/lib/compareStore";
-import { LIFESTYLE_LABELS, LIFESTYLE_STAR_LABELS } from "@/lib/lifestyle";
+import { SCORE_LABELS, type ScoreKey } from "@/lib/scores";
 import { ageOf, fmtM2, fmtMoney, fmtYear } from "@/lib/estdata";
 
 const Icon = ({ d, size = 14 }: { d: string; size?: number }) => (
@@ -22,28 +22,9 @@ const IconDoor = <Icon d="M3 22h18M5 22V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v18M14 1
 const IconRuler = <Icon d="M21 16V8a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM7 10h.01M11 10h.01M15 10h.01M7 14h.01M11 14h.01M15 14h.01" />;
 const IconSun = <Icon d="M12 3v1M12 20v1M3 12h1M20 12h1M5.6 5.6l.7.7M17.7 17.7l.7.7M5.6 18.4l.7-.7M17.7 6.3l.7-.7M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" />;
 
-function Stars({ value, max = 5 }: { value: number; max?: number }) {
-  return (
-    <span className="inline-flex gap-px">
-      {Array.from({ length: max }).map((_, i) => (
-        <svg
-          key={i}
-          className={`w-3 h-3 ${i < value ? "text-ink" : "text-rule2"}`}
-          viewBox="0 0 20 20"
-          fill="currentColor"
-          aria-hidden="true"
-        >
-          <path d="M10 1l2.5 6 6.5.6-5 4.5 1.5 6.4L10 15l-5.5 3.5L6 12 1 7.6 7.5 7z" />
-        </svg>
-      ))}
-    </span>
-  );
-}
-
 function PhotoFor({ id }: { id: string }) {
   const sum = id.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
   const cls = ["bg-stone-300", "bg-amber-200", "bg-slate-300", "bg-stone-200"][sum % 4];
-  // Architectural silhouette SVG (no ToS risk)
   return (
     <div className={`relative w-full aspect-[4/3] ${cls}`}>
       <svg className="absolute inset-0 w-full h-full" viewBox="0 0 200 150" preserveAspectRatio="none">
@@ -72,6 +53,24 @@ function EnergyPill({ k }: { k: string | null }) {
   );
 }
 
+function Stars({ value, max = 5 }: { value: number; max?: number }) {
+  return (
+    <span className="inline-flex gap-px">
+      {Array.from({ length: max }).map((_, i) => (
+        <svg
+          key={i}
+          className={`w-3 h-3 ${i < value ? "text-ink" : "text-rule2"}`}
+          viewBox="0 0 20 20"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M10 1l2.5 6 6.5.6-5 4.5 1.5 6.4L10 15l-5.5 3.5L6 12 1 7.6 7.5 7z" />
+        </svg>
+      ))}
+    </span>
+  );
+}
+
 type Props = {
   column: CompareColumn;
   index: number;
@@ -86,11 +85,8 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
   const county = (addr?.match(/,\s*([A-ZÜÖÄÕ][^,]*maakond)/) || [])[1] ?? "";
   const city = (addr?.match(/,\s*([^,]+linn(?:osa)?)/) || [])[1] ?? "";
 
-  // Real €/m² from cadastre maks_hind + EHR net area
-  const price =
-    column.input.manualPrice != null
-      ? column.input.manualPrice
-      : c?.maks_hind ?? null;
+  // Price & area
+  const price = column.input.manualPrice != null ? column.input.manualPrice : c?.maks_hind ?? null;
   const areaM2 =
     column.input.manualArea != null
       ? column.input.manualArea
@@ -100,7 +96,6 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
     column.input.manualArea && e?.suletud_netopind
       ? Math.max(0, column.input.manualArea - e.suletud_netopind)
       : null;
-
   const pricePerM2 = price != null && areaM2 ? Math.round(price / areaM2) : null;
   const diffVsMedian =
     pricePerM2 != null && medianPriceM2 != null && medianPriceM2 > 0
@@ -115,7 +110,14 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
           ? "#166534"
           : undefined;
 
-  const l = column.lifestyle;
+  // Build the 4 scores
+  const { fairValue, tco, appreciation, lifestyle, overall, overallLabel } = column.scores;
+  const scoreRows: { key: ScoreKey; value: number; reason: string; tone: "good" | "warn" | "bad" | "neutral" }[] = [
+    { key: "fairValue", value: fairValue.score, reason: fairValue.reason, tone: fairValue.score >= 4 ? "good" : fairValue.score <= 2 ? "bad" : "neutral" },
+    { key: "tco", value: tco.score, reason: tco.reason, tone: tco.score >= 4 ? "good" : tco.score <= 2 ? "bad" : "neutral" },
+    { key: "appreciation", value: appreciation.score, reason: appreciation.reason, tone: appreciation.score >= 4 ? "good" : appreciation.score <= 2 ? "bad" : "neutral" },
+    { key: "lifestyle", value: lifestyle.score, reason: lifestyle.reason, tone: lifestyle.score >= 4 ? "good" : lifestyle.score <= 2 ? "bad" : "neutral" },
+  ];
 
   return (
     <div className="bg-white border border-rule overflow-hidden flex flex-col">
@@ -133,6 +135,11 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
         <span className="absolute top-2 left-2 text-[10px] font-semibold tracking-wider uppercase bg-white/90 backdrop-blur px-2 py-0.5 text-ink">
           #{String(index + 1).padStart(2, "0")}
         </span>
+        {overall > 0 && (
+          <span className="absolute bottom-2 right-2 bg-ink text-paper text-[10px] font-semibold tracking-wider uppercase px-2 py-0.5">
+            {overall.toFixed(1)} / 5 · {overallLabel}
+          </span>
+        )}
       </div>
 
       {/* Name + location */}
@@ -178,11 +185,7 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
             "—"
           )}
           {diffVsMedian != null && (
-            <span
-              className="ml-2"
-              style={{ color: priceColor }}
-              title="Erinevus piirkonna mediaanist"
-            >
+            <span className="ml-2" style={{ color: priceColor }}>
               ({diffVsMedian > 0 ? "+" : ""}
               {(diffVsMedian * 100).toFixed(1)}%)
             </span>
@@ -193,26 +196,30 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
         )}
       </div>
 
-      {/* Lifestyle stars with live counts */}
+      {/* The 4 scores — the comparison core */}
       <div className="px-4 pb-4">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted mb-2.5">Elustiil (1 km)</p>
-        <ul className="space-y-1.5">
-          {Object.entries(LIFESTYLE_LABELS).map(([k, label]) => {
-            const v = l[k as keyof typeof l] ?? { stars: 0, label: "—", count: 0 };
+        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted mb-2.5">Skoorid</p>
+        <ul className="space-y-2">
+          {scoreRows.map((s) => {
+            const l = SCORE_LABELS[s.key];
+            const tone =
+              s.tone === "good" ? "bg-emerald-50" :
+              s.tone === "bad" ? "bg-red-50" :
+              "bg-paper";
             return (
-              <li key={k} className="flex items-center justify-between gap-2 text-[11.5px]">
-                <span className="text-muted truncate">{label}</span>
-                <span className="flex items-center gap-2 shrink-0">
-                  <span className="text-ink font-mono text-[10.5px]">{v.label}</span>
-                  <Stars value={v.stars} />
-                </span>
+              <li key={s.key} className={`rounded ${tone} px-2.5 py-1.5`}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-[11.5px] font-semibold text-ink">{l.title}</span>
+                  <Stars value={s.value} />
+                </div>
+                <p className="mt-0.5 text-[10.5px] text-muted leading-snug">{s.reason}</p>
               </li>
             );
           })}
         </ul>
       </div>
 
-      {/* Data table */}
+      {/* Data table — just the key facts */}
       <div className="border-t border-rule">
         <table className="w-full text-[11.5px]">
           <tbody>
@@ -223,14 +230,11 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
               value={e?.minKorrusteArv != null ? `${e.minKorrusteArv}${e.maxKorrusteArv && e.maxKorrusteArv !== e.minKorrusteArv ? `–${e.maxKorrusteArv}` : ""}` : "—"}
             />
             <Row label="Küte" value={e?.energy[0]?.kytteTyypTxt ?? "—"} />
-            <Row label="Kasutusluba" value={fmtYear(e?.esmaneKasutus)} />
             <Row label="Omandivorm" value={c?.omvorm ?? "—"} />
             <Row label="Maksustamisväärtus" value={c?.maks_hind != null ? fmtMoney(c.maks_hind) : "—"} />
             <Row label="Katastri nr" value={c?.tunnus ?? "—"} mono />
             <Row label="EHR kood" value={e?.ehr_code ?? "—"} mono />
-            <Row label="Parkimine" value="tänaval" muted />
-            <Row label="Kohvik lähedal" value={l.cafe ? `${l.cafe.count} (${l.cafe.stars}/5)` : "—"} />
-            <Row label="Ühistransport" value={l.transit ? `${l.transit.count} (${l.transit.stars}/5)` : "—"} />
+            <Row label="Kasutusluba" value={fmtYear(e?.esmaneKasutus)} />
           </tbody>
         </table>
       </div>
@@ -238,11 +242,11 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
   );
 }
 
-function Row({ label, value, mono = false, muted = false }: { label: string; value: React.ReactNode; mono?: boolean; muted?: boolean }) {
+function Row({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
     <tr className="border-b border-rule last:border-b-0">
       <td className="px-4 py-2.5 text-muted align-top whitespace-nowrap">{label}</td>
-      <td className={`px-4 py-2.5 text-right align-top ${mono ? "font-mono text-[11px]" : ""} ${muted ? "text-faint" : "text-ink"}`}>{value}</td>
+      <td className={`px-4 py-2.5 text-right text-ink align-top ${mono ? "font-mono text-[11px]" : ""}`}>{value}</td>
     </tr>
   );
 }

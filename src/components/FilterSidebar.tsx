@@ -9,7 +9,7 @@ export type Filters = {
   areaMax?: number;
   roomsMin?: number;
   energy?: string[]; // ["A","B",...]
-  lifestyle?: string[]; // ["park","school","gym","transit","shop","quiet"]
+  minOverall?: number; // minimum overall score (1-5)
 };
 
 type Props = {
@@ -18,15 +18,6 @@ type Props = {
   matchCount: number;
   totalCount: number;
 };
-
-const LIFESTYLE_LABELS: { key: string; label: string }[] = [
-  { key: "park", label: "Park lähedal" },
-  { key: "school", label: "Kool lähedal" },
-  { key: "gym", label: "Spordisaal lähedal" },
-  { key: "transit", label: "Ühistransport" },
-  { key: "shop", label: "Pood lähedal" },
-  { key: "quiet", label: "Vaikne piirkond" },
-];
 
 const ENERGY = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
 
@@ -69,6 +60,14 @@ function FieldNumber({
   );
 }
 
+const OVERALL_OPTIONS = [
+  { value: 0, label: "Kõik" },
+  { value: 4.5, label: "4.5+" },
+  { value: 4, label: "4.0+" },
+  { value: 3.5, label: "3.5+" },
+  { value: 3, label: "3.0+" },
+];
+
 export default function FilterSidebar({ filters, onChange, matchCount, totalCount }: Props) {
   function update(patch: Partial<Filters>) {
     onChange({ ...filters, ...patch });
@@ -76,10 +75,6 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
   function toggleEnergy(klass: string) {
     const cur = filters.energy ?? [];
     update({ energy: cur.includes(klass) ? cur.filter((k) => k !== klass) : [...cur, klass] });
-  }
-  function toggleLifestyle(key: string) {
-    const cur = filters.lifestyle ?? [];
-    update({ lifestyle: cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key] });
   }
   function clearAll() {
     onChange({});
@@ -89,13 +84,12 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
     (filters.areaMin != null) || (filters.areaMax != null) ||
     (filters.roomsMin != null) ||
     (filters.energy?.length ?? 0) > 0 ||
-    (filters.lifestyle?.length ?? 0) > 0;
+    (filters.minOverall != null && filters.minOverall > 0);
 
   return (
     <aside className="w-full lg:w-72 shrink-0">
       <div className="lg:sticky lg:top-20">
         <div className="bg-white border border-rule rounded-lg overflow-hidden">
-          {/* Header — clear & informative */}
           <div className="px-5 pt-5 pb-3 border-b border-rule">
             <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted">Filtrid</p>
             <h2 className="mt-1 display-tight text-[19px] text-ink leading-tight">
@@ -108,7 +102,7 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
           <div className="px-5 py-4 space-y-5">
             {/* Price */}
             <div>
-              <p className="eyebrow text-muted mb-2">Hind</p>
+              <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted mb-2">Hind</p>
               <div className="grid grid-cols-2 gap-2">
                 <FieldNumber label="Alates" value={filters.priceMin} onChange={(n) => update({ priceMin: n })} suffix="€" />
                 <FieldNumber label="Kuni"  value={filters.priceMax} onChange={(n) => update({ priceMax: n })} suffix="€" />
@@ -117,16 +111,16 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
 
             {/* Size */}
             <div>
-              <p className="eyebrow text-muted mb-2">Pindala</p>
+              <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted mb-2">Pindala</p>
               <div className="grid grid-cols-2 gap-2">
                 <FieldNumber label="Alates" value={filters.areaMin} onChange={(n) => update({ areaMin: n })} suffix="m²" />
                 <FieldNumber label="Kuni"  value={filters.areaMax} onChange={(n) => update({ areaMax: n })} suffix="m²" />
               </div>
             </div>
 
-            {/* Rooms — just min, max is rarely useful */}
+            {/* Rooms */}
             <div>
-              <p className="eyebrow text-muted mb-2">Toad</p>
+              <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted mb-2">Toad</p>
               <div className="grid grid-cols-3 gap-1.5">
                 {["1", "2", "3", "4", "5+"].map((n) => {
                   const v = n === "5+" ? 5 : Number(n);
@@ -153,14 +147,13 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
               </div>
             </div>
 
-            {/* Energy class — letter toggles with clear color coding */}
+            {/* Energy class */}
             <div>
-              <p className="eyebrow text-muted mb-2">Energiamärgis</p>
+              <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted mb-2">Energiamärgis</p>
               <div className="flex flex-wrap gap-1">
                 {ENERGY.map((k) => {
                   const active = (filters.energy ?? []).includes(k);
                   const good = ["A", "B", "C"].includes(k);
-                  const mid = ["D", "E"].includes(k);
                   return (
                     <button
                       key={k}
@@ -170,9 +163,7 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
                                   ${active
                                     ? good
                                       ? "bg-energyA border-energyA text-white"
-                                      : mid
-                                        ? "bg-energyC border-energyC text-white"
-                                        : "bg-ink border-ink text-paper"
+                                      : "bg-ink border-ink text-paper"
                                     : "bg-white border-rule text-muted hover:border-ink hover:text-ink"}`}
                     >
                       {k}
@@ -180,46 +171,33 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
                   );
                 })}
               </div>
-              <p className="mt-1.5 text-[10.5px] text-faint">A–C = roheline energiamärgis (rohelaen)</p>
+              <p className="mt-1.5 text-[10.5px] text-faint">A–C = roheline (rohelaen)</p>
             </div>
 
-            {/* Lifestyle — proper checkboxes with green checkmarks */}
+            {/* Overall score */}
             <div>
-              <p className="eyebrow text-muted mb-2">Elustiil</p>
-              <ul className="space-y-1.5">
-                {LIFESTYLE_LABELS.map((o) => {
-                  const active = (filters.lifestyle ?? []).includes(o.key);
+              <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted mb-2">Üldskoori alampiir</p>
+              <div className="grid grid-cols-5 gap-1">
+                {OVERALL_OPTIONS.map((o) => {
+                  const active = (filters.minOverall ?? 0) === o.value;
                   return (
-                    <li key={o.key}>
-                      <label className="flex items-center gap-2.5 cursor-pointer group">
-                        <input
-                          type="checkbox"
-                          checked={active}
-                          onChange={() => toggleLifestyle(o.key)}
-                          className="sr-only peer"
-                        />
-                        <span className={`shrink-0 w-4 h-4 grid place-items-center border transition-colors
-                                         ${active
-                                           ? "bg-energyA border-energyA"
-                                           : "bg-white border-rule2 group-hover:border-ink"}`}>
-                          {active && (
-                            <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" strokeWidth="2.5">
-                              <path d="M2 6l3 3 5-6" />
-                            </svg>
-                          )}
-                        </span>
-                        <span className="text-[13px] text-ink group-hover:text-accent transition-colors">
-                          {o.label}
-                        </span>
-                      </label>
-                    </li>
+                    <button
+                      key={o.value}
+                      onClick={() => update({ minOverall: o.value === 0 ? undefined : o.value })}
+                      className={`py-1.5 text-[11.5px] font-semibold border transition-colors
+                                  ${active
+                                    ? "bg-ink text-paper border-ink"
+                                    : "bg-white border-rule text-muted hover:border-ink hover:text-ink"}`}
+                    >
+                      {o.label}
+                    </button>
                   );
                 })}
-              </ul>
+              </div>
+              <p className="mt-1.5 text-[10.5px] text-faint">Filtreeri 4 skoori keskmise järgi</p>
             </div>
           </div>
 
-          {/* Footer — single clear action */}
           <div className="px-5 py-4 border-t border-rule bg-paper/50">
             <button
               disabled={!hasFilters}
@@ -231,10 +209,9 @@ export default function FilterSidebar({ filters, onChange, matchCount, totalCoun
           </div>
         </div>
 
-        {/* Quick stats card — context, not a CTA */}
         <div className="mt-3 px-2 text-[10.5px] text-faint leading-snug">
-          Filtrid rakenduvad koheselt. Andmed pärinevad katastri (Maa-amet X-tee)
-          ja ehitise (Ehitisregister) registritest.
+          Filtrid rakenduvad koheselt. Andmed pärinevad katastri (Maa-amet X-tee),
+          ehitise (Ehitisregister) ja OpenStreetMap registritest.
         </div>
       </div>
     </aside>

@@ -1,0 +1,271 @@
+// Four-score evaluation for property comparison.
+//
+//   1. Fair Value       — is the asking price reasonable vs market?
+//   2. TCO              — Total Cost of Ownership (energy + heating)
+//   3. Appreciation     — future value outlook (build year + energy class + city)
+//   4. Lifestyle Match  — neighborhood POI density (parks, schools, transit, etc.)
+//
+// Each score is 1–5 (integer + label).
+// The numeric value is meaningful for both visual rating and filtering
+// ("elustiil 3+ stars" means Lifestyle Match ≥ 3).
+
+import type { CadastreRecord, EhrBuilding } from "./estdata";
+import type { Lifestyle } from "./lifestyle";
+
+export type ScoreKey = "fairValue" | "tco" | "appreciation" | "lifestyle";
+
+export const SCORE_LABELS: Record<ScoreKey, { title: string; subtitle: string; oneStar: string; fiveStar: string }> = {
+  fairValue: {
+    title: "Fair Value",
+    subtitle: "Hind vs. turu mediaan",
+    oneStar: "väga ülehinnatud",
+    fiveStar: "väga hea õiglase väärtusega",
+  },
+  tco: {
+    title: "Elamiskulud",
+    subtitle: "Igakuised kulud (küte, elekter)",
+    oneStar: "väga kulukas sees elada",
+    fiveStar: "soodne sees elada",
+  },
+  appreciation: {
+    title: "Väärtuse kasv",
+    subtitle: "Tuleviku potentsiaal",
+    oneStar: "väga halb potentsiaal, kahanev",
+    fiveStar: "tulevikus väärtus kasvab",
+  },
+  lifestyle: {
+    title: "Elustiil",
+    subtitle: "Lähedal: park, kool, transport",
+    oneStar: "tühi piirkond",
+    fiveStar: "kõik lähedal",
+  },
+};
+
+// ===== 1. Fair Value =====
+// ratio = price / marketMedian. < 1 = below market, > 1 = above.
+// We also cross-check against the Maa-amet 2022 tax value as a sanity check.
+export function fairValueScore(
+  pricePerM2: number | null,
+  marketMedian: number | null,
+  maksHind: number | null,
+  area: number | null,
+): { score: number; ratio: number | null; maxDiff: number | null; reason: string } {
+  if (pricePerM2 == null || pricePerM2 <= 0) {
+    return { score: 0, ratio: null, maxDiff: null, reason: "andmed puuduvad" };
+  }
+  // Reference: prefer market median; fall back to maks_hind
+  const ref = marketMedian ?? (maksHind != null && area ? maksHind / area : null);
+  if (ref == null || ref <= 0) {
+    return { score: 3, ratio: null, maxDiff: null, reason: "võrdlusandmed puuduvad" };
+  }
+  const ratio = pricePerM2 / ref;
+  let score: number;
+  if (ratio <= 0.7) score = 5;
+  else if (ratio <= 0.9) score = 4;
+  else if (ratio <= 1.1) score = 3;
+  else if (ratio <= 1.3) score = 2;
+  else score = 1;
+  // Tighter verification: if batch median is wildly different from tax
+  // value, surface the larger delta.
+  const taxRatio = maksHind != null && area ? (pricePerM2 / (maksHind / area)) : null;
+  const maxDiff = taxRatio != null ? Math.max(Math.abs(ratio - 1), Math.abs(taxRatio - 1)) : Math.abs(ratio - 1);
+  return {
+    score,
+    ratio,
+    maxDiff,
+    reason:
+      score === 5
+        ? "turu mediaanist oluliselt madalam"
+        : score === 4
+          ? "alla turu mediaani"
+          : score === 3
+            ? "turu mediaani lähedal"
+            : score === 2
+              ? "üle turu mediaani"
+              : "turu mediaanist oluliselt kõrgem",
+  };
+}
+
+// ===== 2. TCO (Total Cost of Ownership) =====
+// Primary signal: energiaKaalKasutus (kWh/m²/year). The lower, the cheaper.
+// Secondary: energy class as a fallback.
+export function tcoScore(
+  energyKlass: string | null,
+  kWhM2Year: number | null,
+  area: number | null,
+): { score: number; kWh: number | null; reason: string } {
+  if (kWhM2Year != null && kWhM2Year > 0) {
+    let score: number;
+    if (kWhM2Year <= 80) score = 5;
+    else if (kWhM2Year <= 120) score = 4;
+    else if (kWhM2Year <= 160) score = 3;
+    else if (kWhM2Year <= 220) score = 2;
+    else score = 1;
+    const annualKWh = area && kWhM2Year ? Math.round(area * kWhM2Year) : null;
+    return {
+      score,
+      kWh: kWhM2Year,
+      reason: annualKWh ? `~${annualKWh.toLocaleString("et-EE")} kWh/aastas` : `${kWhM2Year} kWh/m²/aastas`,
+    };
+  }
+  if (energyKlass) {
+    const map: Record<string, number> = { A: 5, B: 4, C: 3, D: 2, E: 1, F: 1, G: 1, H: 1 };
+    const s = map[energyKlass] ?? 3;
+    return { score: s, kWh: null, reason: `energia­märgis ${energyKlass}` };
+  }
+  return { score: 0, kWh: null, reason: "andmed puuduvad" };
+}
+
+// ===== 3. Appreciation Potential =====
+// Modern + energy-efficient = appreciates. Old + inefficient = risks losing value.
+export function appreciationScore(
+  buildYear: number | null,
+  energyKlass: string | null,
+): { score: number; reason: string } {
+  if (buildYear == null) {
+    return { score: 0, reason: "valmimisaasta puudub" };
+  }
+  const eff = energyKlass && ["A", "B", "C"].includes(energyKlass);
+  const mid = energyKlass && ["D", "E"].includes(energyKlass);
+  const ineff = energyKlass && ["F", "G", "H"].includes(energyKlass);
+  const modern = buildYear >= 2015;
+  const late20 = buildYear >= 1990 && buildYear < 2015;
+  const soviet = buildYear >= 1960 && buildYear < 1990;
+  const historical = buildYear < 1960;
+
+  let score: number;
+  let reason: string;
+  if (modern && eff) {
+    score = 5;
+    reason = "uus + roheline energia­märgis";
+  } else if ((modern && mid) || (late20 && eff)) {
+    score = 4;
+    reason = "uus või renoveeritud, hea energia­märgis";
+  } else if (modern && ineff) {
+    score = 3;
+    reason = "uus, kuid energiakulukas";
+  } else if (late20 && mid) {
+    score = 3;
+    reason = "keskmine vanus ja energia­märgis";
+  } else if (soviet && eff) {
+    score = 3;
+    reason = "renoveeritud nõuk. aegade ehitis";
+  } else if (soviet && (mid || ineff)) {
+    score = 2;
+    reason = "nõuk. aegne paneelmaja, kõrge energiakulu";
+  } else if (historical && eff) {
+    score = 2;
+    reason = "väga vana, kuid renoveeritud";
+  } else {
+    score = 1;
+    reason = "väga vana, kõrge hoolduskulu risk";
+  }
+  return { score, reason };
+}
+
+// ===== 4. Lifestyle Match =====
+// Weights: each POI category contributes. Sum → score 1–5.
+const LIFESTYLE_WEIGHTS: { key: keyof Lifestyle; weight: number }[] = [
+  { key: "transit", weight: 2.0 },   // ühistransport — high impact
+  { key: "school", weight: 2.0 },    // kool
+  { key: "park", weight: 1.5 },      // park
+  { key: "cafe", weight: 1.0 },
+  { key: "restaurant", weight: 1.0 },
+  { key: "shop", weight: 1.0 },
+  { key: "gym", weight: 0.5 },
+];
+
+// 1 unit ≈ walking distance (~5 min). 5+ units = excellent.
+// We cap each category at a sensible max (e.g. 6 transit stops) to
+// prevent a single category from dominating.
+function capForKey(k: keyof Lifestyle): number {
+  if (k === "transit") return 8;
+  if (k === "cafe" || k === "restaurant") return 8;
+  if (k === "shop") return 4;
+  if (k === "school") return 4;
+  if (k === "park") return 3;
+  if (k === "gym") return 3;
+  return 5;
+}
+
+export function lifestyleScore(l: Lifestyle): { score: number; top: { key: keyof Lifestyle; count: number }[]; reason: string } {
+  let total = 0;
+  const maxPossible = LIFESTYLE_WEIGHTS.reduce((a, w) => a + w.weight * capForKey(w.key), 0);
+  for (const { key, weight } of LIFESTYLE_WEIGHTS) {
+    const v = l[key];
+    if (!v) continue;
+    const capped = Math.min(v.count, capForKey(key));
+    total += capped * weight;
+  }
+  const norm = total / maxPossible; // 0–1
+  let score: number;
+  if (norm >= 0.7) score = 5;
+  else if (norm >= 0.5) score = 4;
+  else if (norm >= 0.3) score = 3;
+  else if (norm >= 0.15) score = 2;
+  else score = 1;
+  // Top contributing categories for the reason
+  const top = LIFESTYLE_WEIGHTS
+    .map((w) => ({ key: w.key, count: l[w.key]?.count ?? 0 }))
+    .filter((x) => x.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 2);
+  const reason = top.length > 0
+    ? `${top.map((t) => `${t.count} ${t.key}`).join(", ")} lähedal`
+    : "tühi piirkond";
+  return { score, top, reason };
+}
+
+// ===== Combined: compute all four scores for a property =====
+
+export type PropertyScores = {
+  fairValue: ReturnType<typeof fairValueScore>;
+  tco: ReturnType<typeof tcoScore>;
+  appreciation: ReturnType<typeof appreciationScore>;
+  lifestyle: ReturnType<typeof lifestyleScore>;
+  // Simple average for an "overall" badge
+  overall: number;
+  overallLabel: string;
+};
+
+export function computeScores(opts: {
+  c: CadastreRecord | null;
+  e: EhrBuilding | null;
+  lifestyle: Lifestyle;
+  marketMedian: number | null;
+  pricePerM2Override?: number | null;
+}): PropertyScores {
+  const { c, e, lifestyle, marketMedian, pricePerM2Override } = opts;
+  const energy = e?.energy[0] ?? null;
+  const buildYear = e?.esmaneKasutus
+    ? parseInt(e.esmaneKasutus, 10)
+    : e?.ehAlustKp
+      ? parseInt(String(e.ehAlustKp).slice(0, 4), 10)
+      : null;
+  const pricePerM2 = pricePerM2Override != null
+    ? pricePerM2Override
+    : (c?.maks_hind != null && c.pindala > 0) ? c.maks_hind / c.pindala : null;
+
+  const fairValue = fairValueScore(pricePerM2, marketMedian, c?.maks_hind ?? null, c?.pindala ?? null);
+  const tco = tcoScore(energy?.energiaKlass ?? null, energy?.energiaKaalKasutus ? Number(energy.energiaKaalKasutus) : null, e?.suletud_netopind ?? null);
+  const appreciation = appreciationScore(buildYear, energy?.energiaKlass ?? null);
+  const lifestyleS = lifestyleScore(lifestyle);
+
+  // Overall: weighted average (lifestyle counts more for buyers, fairValue counts more for investors)
+  const vals = [fairValue.score, tco.score, appreciation.score, lifestyleS.score].filter((s) => s > 0);
+  const overall = vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+  const overallLabel =
+    overall >= 4.5
+      ? "suurepärane"
+      : overall >= 3.5
+        ? "hea"
+        : overall >= 2.5
+          ? "keskmine"
+          : overall >= 1.5
+            ? "nõrk"
+            : overall > 0
+              ? "halb"
+              : "andmed puuduvad";
+
+  return { fairValue, tco, appreciation, lifestyle: lifestyleS, overall, overallLabel };
+}

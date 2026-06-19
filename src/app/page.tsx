@@ -6,13 +6,13 @@ import CompareSlot from "@/components/CompareSlot";
 import CompareColumnView from "@/components/CompareColumnView";
 import {
   decodeShareUrl,
+  defaultScores,
   loadCompare,
   makeId,
   saveCompare,
   type CompareColumn,
-  type CompareInput,
 } from "@/lib/compareStore";
-import { scoreLifestyle } from "@/lib/lifestyle";
+import { computeScores } from "@/lib/scores";
 
 const MAX_SLOTS = 5;
 
@@ -21,7 +21,18 @@ type ResolveResponse = {
   picked: { viitepunkt_l: number; viitepunkt_b: number; pikkaadress: string } | null;
   cadastre: { pindala: number; tunnus: string } | null;
   ehr: { ehr_code: string; esmaneKasutus: string | null; energy: { energiaKlass: string | null }[] } | null;
+  lifestyle?: { park: { stars: number; label: string; count: number }; school: { stars: number; label: string; count: number }; gym: { stars: number; label: string; count: number }; transit: { stars: number; label: string; count: number }; shop: { stars: number; label: string; count: number }; cafe: { stars: number; label: string; count: number }; restaurant: { stars: number; label: string; count: number } };
   errors: string[];
+};
+
+const EMPTY_LIFESTYLE = {
+  park: { stars: 0, label: "—", count: 0 },
+  school: { stars: 0, label: "—", count: 0 },
+  gym: { stars: 0, label: "—", count: 0 },
+  transit: { stars: 0, label: "—", count: 0 },
+  shop: { stars: 0, label: "—", count: 0 },
+  cafe: { stars: 0, label: "—", count: 0 },
+  restaurant: { stars: 0, label: "—", count: 0 },
 };
 
 export default function Home() {
@@ -37,21 +48,13 @@ export default function Home() {
     if (shared) {
       const inputs = decodeShareUrl(shared);
       if (inputs.length > 0) {
-        // Hydrate as empty columns with raw inputs; user clicks "Lisa võrdlusesse"
         const initial: CompareColumn[] = inputs.slice(0, MAX_SLOTS).map((raw) => ({
           id: makeId(),
           input: { raw },
           cadastre: null,
           ehr: null,
-          lifestyle: {
-            park: { stars: 0, label: "—", count: 0 },
-            school: { stars: 0, label: "—", count: 0 },
-            gym: { stars: 0, label: "—", count: 0 },
-            transit: { stars: 0, label: "—", count: 0 },
-            shop: { stars: 0, label: "—", count: 0 },
-            cafe: { stars: 0, label: "—", count: 0 },
-            restaurant: { stars: 0, label: "—", count: 0 },
-          },
+          lifestyle: EMPTY_LIFESTYLE,
+          scores: defaultScores(),
           fetchedAt: 0,
           errors: [],
         }));
@@ -64,13 +67,25 @@ export default function Home() {
     setReady(true);
   }, []);
 
-  // Persist
   useEffect(() => {
     if (!ready) return;
     saveCompare(columns);
   }, [columns, ready]);
 
-  // Filtering
+  // Price per m² helper
+  const pricePerM2Of = (col: CompareColumn): number | null => {
+    if (col.input.manualPrice != null) {
+      const a = col.input.manualArea;
+      return a && a > 0 ? col.input.manualPrice / a : null;
+    }
+    const c = col.cadastre;
+    const e = col.ehr;
+    const price = c?.maks_hind ?? null;
+    const area = e?.suletud_netopind ?? c?.pindala ?? null;
+    return price != null && area && area > 0 ? price / area : null;
+  };
+
+  // Filtered set — pre-compute price/area for filtering
   const filtered = useMemo(() => {
     return columns.filter((col) => {
       const c = col.cadastre;
@@ -87,29 +102,39 @@ export default function Home() {
       if (filters.energy?.length) {
         if (!energy || !filters.energy.includes(energy)) return false;
       }
-      if (filters.lifestyle?.length) {
-        for (const k of filters.lifestyle) {
-          const v = col.lifestyle[k as keyof typeof col.lifestyle];
-          if (!v || v.stars < 3) return false;
-        }
+      if (filters.minOverall && col.scores.overall > 0) {
+        if (col.scores.overall < filters.minOverall) return false;
       }
       return true;
     });
   }, [columns, filters]);
 
+  // Batch median €/m² for Fair Value scoring
   const medianPriceM2 = useMemo(() => {
     const pps: number[] = [];
     for (const col of filtered) {
-      const c = col.cadastre;
-      const e = col.ehr;
-      const price = col.input.manualPrice ?? c?.maks_hind ?? null;
-      const area = col.input.manualArea ?? e?.suletud_netopind ?? c?.pindala ?? null;
-      if (price != null && area) pps.push(price / area);
+      const v = pricePerM2Of(col);
+      if (v != null) pps.push(v);
     }
     if (pps.length === 0) return null;
     pps.sort((a, b) => a - b);
     return pps[Math.floor(pps.length / 2)];
   }, [filtered]);
+
+  // Augment each filtered column with live scores that depend on the
+  // batch median. The stored `scores` is the fallback (no median).
+  const filteredWithScores = useMemo(() => {
+    return filtered.map((col) => {
+      const liveScores = computeScores({
+        c: col.cadastre,
+        e: col.ehr,
+        lifestyle: col.lifestyle,
+        marketMedian: medianPriceM2,
+        pricePerM2Override: pricePerM2Of(col),
+      });
+      return { ...col, scores: liveScores };
+    });
+  }, [filtered, medianPriceM2]);
 
   async function resolveSlot(
     raw: string,
@@ -124,17 +149,32 @@ export default function Home() {
       });
       if (!r.ok) return { ok: false, error: `Server viga: ${r.status}` };
       const j: ResolveResponse = await r.json();
+      const cad = (j.cadastre as CompareColumn["cadastre"]) ?? null;
+      const e = (j.ehr as CompareColumn["ehr"]) ?? null;
+      const lifestyle = (j.lifestyle as CompareColumn["lifestyle"]) ?? EMPTY_LIFESTYLE;
       const newCol: CompareColumn = {
         id: makeId(),
-        input: { raw, manualPrice: manual?.price ?? null, manualArea: manual?.area ?? null, manualRooms: manual?.rooms ?? null },
-        cadastre: (j.cadastre as CompareColumn["cadastre"]) ?? null,
-        ehr: (j.ehr as CompareColumn["ehr"]) ?? null,
-        lifestyle: scoreLifestyle((j.cadastre as CompareColumn["cadastre"]) ?? null, (j.ehr as CompareColumn["ehr"]) ?? null),
+        input: {
+          raw,
+          manualPrice: manual?.price ?? null,
+          manualArea: manual?.area ?? null,
+          manualRooms: manual?.rooms ?? null,
+        },
+        cadastre: cad,
+        ehr: e,
+        lifestyle,
+        // Stored scores are best-effort (no median yet)
+        scores: computeScores({
+          c: cad,
+          e,
+          lifestyle,
+          marketMedian: null,
+          pricePerM2Override: null,
+        }),
         fetchedAt: Date.now(),
         errors: j.errors,
       };
       setColumns((prev) => {
-        // Replace the first slot that has the same raw input, otherwise append
         const idx = prev.findIndex((c) => c.input.raw === raw);
         if (idx >= 0) {
           const next = [...prev];
@@ -186,6 +226,15 @@ export default function Home() {
     alert("Link kopeeritud!");
   }
 
+  // Add a column by replacing the empty slot when user clicks a slot button.
+  function setColumnAt(idx: number, col: CompareColumn) {
+    setColumns((prev) => {
+      const next = [...prev];
+      next[idx] = col;
+      return next;
+    });
+  }
+
   return (
     <>
       {/* ============== TOP BAR ============== */}
@@ -207,16 +256,17 @@ export default function Home() {
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
                 <path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M16 6l-4-4-4 4M12 2v14" />
               </svg>
-              Salvesta
+              Jaga
             </button>
             <button
-              onClick={shareUrl}
-              className="flex items-center gap-1.5 hover:text-accent transition-colors"
+              onClick={clearAll}
+              disabled={columns.length === 0}
+              className="flex items-center gap-1.5 hover:text-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
-                <circle cx="12" cy="8" r="4" /><path d="M4 22a8 8 0 0 1 16 0" />
+                <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
               </svg>
-              Minu konto
+              Tühjenda
             </button>
           </nav>
         </div>
@@ -225,31 +275,31 @@ export default function Home() {
       {/* ============== MASTHEAD ============== */}
       <section className="border-b border-rule">
         <div className="max-w-compare mx-auto px-5 sm:px-8 py-10 sm:py-14">
-          <p className="eyebrow">Kinnisvara võrdlus</p>
+          <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted">Kinnisvara võrdlus</p>
           <h1 className="display mt-3 text-ink text-balance max-w-[44ch]">
             Võrdle kuni viit kinnisvaraobjekti
             <span className="text-faint"> kõrvuti.</span>
           </h1>
           <p className="mt-4 text-muted max-w-prose text-[15px]">
             Sisesta kuni viis aadressi, kv.ee linki või katastri numbrit. Meie koostame
-            kinnistu, ehitise ja energiamärgise andmed kõrvuti, et näeksid, millist
-            kodu tasub vaatama minna.
+            kinnistu, ehitise ja energiamärgise andmed kõrvuti ning anname nelja skoori:
+            Fair Value (hind vs turu mediaan), TCO (elamiskulud), Appreciation
+            (tuleviku väärtus) ja Elustiil (naabruskond).
           </p>
         </div>
       </section>
 
       {/* ============== GRID ============== */}
       <section className="max-w-compare mx-auto px-5 sm:px-8 py-8 lg:py-12">
-          <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
-            <FilterSidebar
-              filters={filters}
-              onChange={setFilters}
-              matchCount={filtered.length}
-              totalCount={columns.length}
-            />
+        <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
+          <FilterSidebar
+            filters={filters}
+            onChange={setFilters}
+            matchCount={filteredWithScores.length}
+            totalCount={columns.length}
+          />
 
-            <div className="flex-1 min-w-0 w-full">
-            {/* Slots row — always shows up to 5 */}
+          <div className="flex-1 min-w-0 w-full">
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
               {Array.from({ length: MAX_SLOTS }).map((_, i) => (
                 <CompareSlot
@@ -262,40 +312,35 @@ export default function Home() {
               ))}
             </div>
 
-            {/* Comparison columns */}
-            {filtered.length === 0 ? (
-              <EmptyState
-                onTryExample={async () => {
-                  // Pre-load three example addresses
-                  const examples = [
-                    "Viljandi mnt 47, Tallinn",
-                    "Mustamäe tee 51, Tallinn",
-                    "Tartu mnt 84a, Tallinn",
-                  ];
-                  for (const raw of examples) {
-                    await resolveSlot(raw);
-                  }
-                }}
-              />
+            {filteredWithScores.length === 0 ? (
+              <EmptyState onTryExample={async () => {
+                const examples = [
+                  "Viljandi mnt 47, Tallinn",
+                  "Mustamäe tee 51, Tallinn",
+                  "Tartu mnt 84a, Tallinn",
+                ];
+                for (const raw of examples) {
+                  await resolveSlot(raw);
+                }
+              }} />
             ) : (
               <>
                 <div className="flex items-baseline justify-between mb-4">
                   <h2 className="display-tight text-[22px] text-ink">
-                    Võrdlus · <span className="text-faint">{filtered.length} objekti</span>
+                    Võrdlus · <span className="text-faint">{filteredWithScores.length} objekti</span>
                   </h2>
-                  <button
-                    onClick={clearAll}
-                    className="text-[12px] text-muted hover:text-ink transition-colors"
-                  >
-                    Tühjenda kõik
-                  </button>
+                  {medianPriceM2 != null && (
+                    <p className="text-[11px] text-muted hidden sm:block">
+                      Turu mediaan: <span className="text-ink font-mono">€{Math.round(medianPriceM2).toLocaleString("et-EE")}</span> / m²
+                    </p>
+                  )}
                 </div>
                 <div className="overflow-x-auto no-scrollbar -mx-5 sm:-mx-8 px-5 sm:px-8 pb-2">
                   <div
                     className="grid gap-3"
-                    style={{ gridTemplateColumns: `repeat(${filtered.length}, minmax(220px, 1fr))` }}
+                    style={{ gridTemplateColumns: `repeat(${filteredWithScores.length}, minmax(240px, 1fr))` }}
                   >
-                    {filtered.map((col, i) => (
+                    {filteredWithScores.map((col, i) => (
                       <CompareColumnView
                         key={col.id}
                         column={col}
@@ -312,15 +357,14 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ============== FOOTER ============== */}
       <footer className="border-t border-rule mt-12">
         <div className="max-w-compare mx-auto px-5 sm:px-8 py-6 flex flex-col sm:flex-row sm:items-baseline gap-2 justify-between text-[12px] text-muted">
           <p>
             <span className="font-display text-ink">võrdlus</span> · Ehitatud vabade Eesti
-            avalike andmete peale (In-AKS, Maa-amet X-tee, Ehitisregister). Mitte
+            avalike andmete peale (In-AKS, Maa-amet X-tee, Ehitisregister, OpenStreetMap). Mitte
             õigus- ega finantsnõustamine.
           </p>
-          <p className="eyebrow text-faint">v0.1 · 2026</p>
+          <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-faint">v0.2 · 2026</p>
         </div>
       </footer>
     </>
@@ -330,13 +374,14 @@ export default function Home() {
 function EmptyState({ onTryExample }: { onTryExample: () => void }) {
   return (
     <div className="rounded-lg border border-rule bg-white p-8 sm:p-12 text-center">
-      <p className="eyebrow text-muted">Alusta võrdlust</p>
+      <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-muted">Alusta võrdlust</p>
       <h3 className="display mt-2 text-[28px] text-ink max-w-prose mx-auto">
         Sisesta esimene aadress või klõpsa näidet.
       </h3>
       <p className="mt-3 text-muted max-w-prose mx-auto text-[14.5px]">
-        Meie otsime In-AKS registrist, laeme katastri ja ehitise andmed ning
-        arvutame iga objekti kohta elustiili hinnangu vahemikus 1–5.
+        Iga objekt saab neli skoori: <strong>Fair Value</strong> (hind vs turu mediaan),
+        <strong> TCO</strong> (igakuised kulud küte + elekter), <strong>Appreciation</strong> (tuleviku väärtus) ja
+        <strong> Elustiil</strong> (park, kool, transport 1 km raadiuses).
       </p>
       <button
         onClick={onTryExample}
@@ -346,8 +391,8 @@ function EmptyState({ onTryExample }: { onTryExample: () => void }) {
         Lae 3 näidet (Tallinn)
       </button>
       <p className="mt-4 text-[11.5px] text-faint">
-        Või kleebi oma kv.ee link — eraldame aadressi lingi lõpust ja otsime
-        üles In-AKS registrist.
+        Või kleebi oma kv.ee / city24.ee link — meie otsime aadressi URL-ist ja
+        In-AKS-ist.
       </p>
     </div>
   );
