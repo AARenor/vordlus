@@ -31,6 +31,14 @@ export default function CompareSlot({ index, column, onChange, onResolve }: Prop
     rooms: column?.input.manualRooms ?? undefined,
   });
 
+  // Decide if the resolved building is multi-unit — if so, surface the
+  // manual inputs immediately so the user knows to enter their apartment.
+  const nimetus = column?.ehr?.nimetus?.toLowerCase() ?? "";
+  const isMultiUnit =
+    nimetus.includes("korterelamu") ||
+    nimetus.includes("korter") ||
+    (column?.ehr?.tubadeArv != null && column.ehr.tubadeArv > 5);
+
   useEffect(() => {
     setRaw(column?.input.raw ?? "");
     setManual({
@@ -38,8 +46,10 @@ export default function CompareSlot({ index, column, onChange, onResolve }: Prop
       area: column?.input.manualArea ?? undefined,
       rooms: column?.input.manualRooms ?? undefined,
     });
+    // Auto-expand manual inputs for multi-unit buildings
+    setShowManual(isMultiUnit);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [column?.id]);
+  }, [column?.id, isMultiUnit]);
 
   async function submit() {
     const parsed = parseUserInput(raw);
@@ -73,6 +83,10 @@ export default function CompareSlot({ index, column, onChange, onResolve }: Prop
     const e = column.ehr;
     const yearBuilt = e?.esmaneKasutus ? e.esmaneKasutus : (e?.ehAlustKp?.slice(0, 4) ?? null);
     const energy = e?.energy[0]?.energiaKlass ?? null;
+    const missing: string[] = [];
+    if (column.input.manualPrice == null) missing.push("hind");
+    if (column.input.manualArea == null) missing.push("m²");
+    if (column.input.manualRooms == null) missing.push("toad");
     return (
       <div className="rounded-md border border-rule bg-white overflow-hidden">
         <div className="px-3 py-2.5 border-b border-rule flex items-center justify-between gap-2">
@@ -90,10 +104,15 @@ export default function CompareSlot({ index, column, onChange, onResolve }: Prop
             {c?.tais_aadress || e?.taisaadress || column.input.raw}
           </p>
           <div className="mt-2 text-[11px] text-muted space-y-0.5">
-            {c && <p>{c.omvorm} · {c.siht1 ?? "—"}</p>}
-            {e && <p>EHR {e.ehr_code} · {yearBuilt ?? "—"}</p>}
+            {e && <p>{e.nimetus ?? "—"} · EHR {e.ehr_code} · {yearBuilt ?? "—"}</p>}
             {energy && <p>Energiamärgis: <span className="text-ink font-semibold">{energy}</span></p>}
+            {c && <p>Omand: {c.omvorm ?? "—"}</p>}
           </div>
+          {missing.length > 0 && (
+            <p className="mt-2 text-[10.5px] text-warn">
+              ⚠ Sisesta: {missing.join(", ")}
+            </p>
+          )}
           {column.errors.length > 0 && (
             <p className="mt-2 text-[10.5px] text-warn line-clamp-2" title={column.errors.join("; ")}>
               ⚠ {column.errors[0]}
@@ -129,28 +148,33 @@ export default function CompareSlot({ index, column, onChange, onResolve }: Prop
           {showManual ? "− Peida" : "+ Lisa"} käsitsi andmed (hind, m², toad)
         </button>
         {showManual && (
-          <div className="grid grid-cols-3 gap-1.5">
-            <input
-              type="number"
-              value={manual.price ?? ""}
-              onChange={(e) => setManual((m) => ({ ...m, price: e.target.value ? Number(e.target.value) : undefined }))}
-              placeholder="Hind €"
-              className="bg-field border border-rule px-1.5 py-1 text-[11px] font-mono focus:border-ink outline-none"
-            />
-            <input
-              type="number"
-              value={manual.area ?? ""}
-              onChange={(e) => setManual((m) => ({ ...m, area: e.target.value ? Number(e.target.value) : undefined }))}
-              placeholder="m²"
-              className="bg-field border border-rule px-1.5 py-1 text-[11px] font-mono focus:border-ink outline-none"
-            />
-            <input
-              type="number"
-              value={manual.rooms ?? ""}
-              onChange={(e) => setManual((m) => ({ ...m, rooms: e.target.value ? Number(e.target.value) : undefined }))}
-              placeholder="Tube"
-              className="bg-field border border-rule px-1.5 py-1 text-[11px] font-mono focus:border-ink outline-none"
-            />
+          <div className="space-y-1.5">
+            <p className="text-[10px] text-faint leading-snug">
+              Kuulutuse hind ja oma korteri pindala. Seda küsime, sest EHR andmed on kogu hoone kohta.
+            </p>
+            <div className="grid grid-cols-3 gap-1.5">
+              <input
+                type="number"
+                value={manual.price ?? ""}
+                onChange={(e) => setManual((m) => ({ ...m, price: e.target.value ? Number(e.target.value) : undefined }))}
+                placeholder="Hind €"
+                className="bg-field border border-rule px-1.5 py-1 text-[11px] font-mono focus:border-ink outline-none"
+              />
+              <input
+                type="number"
+                value={manual.area ?? ""}
+                onChange={(e) => setManual((m) => ({ ...m, area: e.target.value ? Number(e.target.value) : undefined }))}
+                placeholder="m²"
+                className="bg-field border border-rule px-1.5 py-1 text-[11px] font-mono focus:border-ink outline-none"
+              />
+              <input
+                type="number"
+                value={manual.rooms ?? ""}
+                onChange={(e) => setManual((m) => ({ ...m, rooms: e.target.value ? Number(e.target.value) : undefined }))}
+                placeholder="Tube"
+                className="bg-field border border-rule px-1.5 py-1 text-[11px] font-mono focus:border-ink outline-none"
+              />
+            </div>
           </div>
         )}
         <button

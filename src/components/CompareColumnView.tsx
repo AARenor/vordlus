@@ -85,17 +85,55 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
   const county = (addr?.match(/,\s*([A-ZÜÖÄÕ][^,]*maakond)/) || [])[1] ?? "";
   const city = (addr?.match(/,\s*([^,]+linn(?:osa)?)/) || [])[1] ?? "";
 
-  // Price & area
-  const price = column.input.manualPrice != null ? column.input.manualPrice : c?.maks_hind ?? null;
-  const areaM2 =
-    column.input.manualArea != null
-      ? column.input.manualArea
-      : e?.suletud_netopind ?? c?.pindala ?? null;
-  const rooms = column.input.manualRooms ?? e?.tubadeArv ?? null;
-  const terraceM2 =
-    column.input.manualArea && e?.suletud_netopind
-      ? Math.max(0, column.input.manualArea - e.suletud_netopind)
-      : null;
+  // ── Building type detection ───────────────────────────────────────
+  // EHR kasutusotstarve (ehitiseKasutusotstarbed.kasutusotstarve.kaosIdTxt)
+  // is the most reliable signal. üksikelamu/büroohoone/etc.
+  const nimetus = e?.nimetus?.toLowerCase() ?? "";
+  const isSingleUnit =
+    nimetus.includes("üksikelamu") ||
+    nimetus.includes("elamu") && !nimetus.includes("korter") ||
+    nimetus.includes("büroohoone") ||
+    nimetus.includes("ärihoone") ||
+    nimetus.includes("tootmis") ||
+    nimetus.includes("laohoone") ||
+    nimetus.includes("suvila");
+  const isMultiUnit =
+    nimetus.includes("korterelamu") ||
+    nimetus.includes("korter") ||
+    nimetus.includes("elamu") && nimetus.includes("mitme") ||
+    (e?.tubadeArv != null && e.tubadeArv > 5);
+  // If the building has many rooms AND has apartment-level keywords, treat as
+  // multi-unit. Fall back to "single" if ambiguous.
+  const unitKind: "single" | "multi" | "unknown" = isMultiUnit
+    ? "multi"
+    : isSingleUnit
+      ? "single"
+      : "unknown";
+
+  // ── Price: ONLY user-entered. NEVER fall back to maks_hind (that's the
+  //    2022 Maa-amet tax assessment, not the listing price).
+  const price = column.input.manualPrice ?? null;
+
+  // ── Area: prefer manual; otherwise use building's net area only if
+  //    it's plausibly the user's unit (single family or small building).
+  const hasManualArea = column.input.manualArea != null;
+  const areaM2 = hasManualArea
+    ? column.input.manualArea
+    : unitKind === "multi"
+      ? null
+      : e?.suletud_netopind ?? null;
+
+  // ── Rooms: prefer manual; otherwise use building's room count only for
+  //    single-unit or small buildings. Hide for apartment buildings.
+  const hasManualRooms = column.input.manualRooms != null;
+  const rooms = hasManualRooms
+    ? column.input.manualRooms
+    : unitKind === "multi"
+      ? null
+      : e?.tubadeArv ?? null;
+
+  const terraceM2 = null; // not derivable from public APIs
+
   const pricePerM2 = price != null && areaM2 ? Math.round(price / areaM2) : null;
   const diffVsMedian =
     pricePerM2 != null && medianPriceM2 != null && medianPriceM2 > 0
@@ -109,6 +147,9 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
         : diffVsMedian < -0.05
           ? "#166534"
           : undefined;
+
+  // Whether the user still owes us data
+  const needsManual = price == null || (!hasManualArea && unitKind !== "single");
 
   // Build the 4 scores
   const { fairValue, tco, appreciation, lifestyle, overall, overallLabel } = column.scores;
@@ -150,7 +191,18 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
         <p className="mt-1 text-[11.5px] text-muted">
           {city}
           {county ? ` · ${county}` : ""}
+          {e?.nimetus && (
+            <>
+              {" · "}
+              <span className="italic">{e.nimetus}</span>
+            </>
+          )}
         </p>
+        {unitKind === "multi" && (
+          <p className="mt-1.5 text-[10.5px] text-warn leading-snug">
+            Korterelamu — sisesta oma korteri andmed lahtris #{String(index + 1).padStart(2, "0")}.
+          </p>
+        )}
       </div>
 
       {/* Key metrics */}
@@ -163,10 +215,10 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
           {IconRuler}
           <span className="text-ink font-semibold tabnum">{areaM2 ? `${areaM2} m²` : "—"}</span>
         </div>
-        <div title="Terrass">
+        <div title="Ehitis">
           {IconSun}
           <span className="text-ink font-semibold tabnum">
-            {terraceM2 != null && terraceM2 > 0 ? `${terraceM2} m²` : "—"}
+            {e?.esmaneKasutus ? e.esmaneKasutus.slice(0, 4) : "—"}
           </span>
         </div>
       </div>
@@ -181,8 +233,10 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
             <>
               <span className="tabnum">{fmtMoney(pricePerM2)}</span> / m²
             </>
+          ) : price != null ? (
+            <span className="text-warn">Sisesta pindala, et näha €/m²</span>
           ) : (
-            "—"
+            <span className="text-warn">Sisesta hind</span>
           )}
           {diffVsMedian != null && (
             <span className="ml-2" style={{ color: priceColor }}>
@@ -191,8 +245,15 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
             </span>
           )}
         </p>
-        {price != null && c?.maks_hind === price && (
-          <p className="mt-1 text-[9.5px] text-faint">★ Maa-amet 2022 maksustamisväärtus</p>
+        {price == null && (
+          <p className="mt-1 text-[10px] text-faint">
+            Klõpsa lahtrile #{String(index + 1).padStart(2, "0")} ja sisesta kuulutuse hind
+          </p>
+        )}
+        {price != null && c?.maks_hind != null && c.maks_hind > 0 && (
+          <p className="mt-1 text-[9.5px] text-faint">
+            Maa-amet 2022 maksustamisväärtus: {fmtMoney(c.maks_hind)}
+          </p>
         )}
       </div>
 
@@ -223,18 +284,30 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
       <div className="border-t border-rule">
         <table className="w-full text-[11.5px]">
           <tbody>
-            <Row label="Valmimisaasta" value={fmtYear(e?.esmaneKasutus ?? e?.ehAlustKp)} />
+            <Row label="Ehitise liik" value={e?.nimetus ?? "—"} />
+            <Row label="Esmakasutus" value={fmtYear(e?.esmaneKasutus)} />
             <Row label="Energiamärgis" value={<EnergyPill k={e?.energy[0]?.energiaKlass ?? null} />} />
             <Row
               label="Korruseid"
-              value={e?.minKorrusteArv != null ? `${e.minKorrusteArv}${e.maxKorrusteArv && e.maxKorrusteArv !== e.minKorrusteArv ? `–${e.maxKorrusteArv}` : ""}` : "—"}
+              value={e?.maxKorrusteArv != null ? `${e.maxKorrusteArv}` : "—"}
             />
-            <Row label="Küte" value={e?.energy[0]?.kytteTyypTxt ?? "—"} />
+            <Row
+              label="Hoone netopind"
+              value={e?.suletud_netopind != null ? `${e.suletud_netopind.toLocaleString("et-EE")} m²` : "—"}
+              hint={unitKind === "multi" ? "kogu hoone" : undefined}
+            />
+            <Row
+              label="Küte"
+              value={e?.energy[0]?.kytteTyypTxt ?? "—"}
+            />
             <Row label="Omandivorm" value={c?.omvorm ?? "—"} />
-            <Row label="Maksustamisväärtus" value={c?.maks_hind != null ? fmtMoney(c.maks_hind) : "—"} />
+            <Row
+              label="Maksustamisväärtus"
+              value={c?.maks_hind != null ? fmtMoney(c.maks_hind) : "—"}
+              hint="Maa-amet 2022"
+            />
             <Row label="Katastri nr" value={c?.tunnus ?? "—"} mono />
             <Row label="EHR kood" value={e?.ehr_code ?? "—"} mono />
-            <Row label="Kasutusluba" value={fmtYear(e?.esmaneKasutus)} />
           </tbody>
         </table>
       </div>
@@ -242,10 +315,13 @@ export default function CompareColumnView({ column, index, medianPriceM2, onRemo
   );
 }
 
-function Row({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
+function Row({ label, value, mono = false, hint }: { label: string; value: React.ReactNode; mono?: boolean; hint?: string }) {
   return (
     <tr className="border-b border-rule last:border-b-0">
-      <td className="px-4 py-2.5 text-muted align-top whitespace-nowrap">{label}</td>
+      <td className="px-4 py-2.5 text-muted align-top whitespace-nowrap">
+        {label}
+        {hint && <p className="text-[9.5px] text-faint mt-0.5">{hint}</p>}
+      </td>
       <td className={`px-4 py-2.5 text-right text-ink align-top ${mono ? "font-mono text-[11px]" : ""}`}>{value}</td>
     </tr>
   );

@@ -1,25 +1,36 @@
 // Server-side proxy to OpenStreetMap Overpass API for lifestyle POI scoring.
-// Uses overpass.osm.ch as the public mirror (overpass-api.de returns 406 for
-// our User-Agent). Counts POIs within a configurable radius from a WGS84 point.
+//
+// One union query against any of the OSM Overpass mirrors, bucketed by
+// category. With aggressive Next.js caching (24h s-maxage, 7d SWR) the
+// first request is ~3-8s and subsequent ones are instant.
+//
+// Mirror chain (priority order):
+//   1. overpass-api.de   — official, fresh, but rate-limited on bursts
+//   2. overpass.kumi.systems — community mirror
+//   3. overpass.osm.ch   — Swiss mirror; ON A 2018 SNAPSHOT. Last-resort.
 
 import { NextRequest, NextResponse } from "next/server";
 
-const OVERPASS = "https://overpass.osm.ch/api/interpreter";
+const OVERPASS_MIRRORS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.osm.ch/api/interpreter",
+];
 
-// amenity / shop / leisure tag → Estonian label
-const POI_QUERIES: { key: string; label: string; query: string }[] = [
-  { key: "park", label: "Park lähedal", query: `node["leisure"="park"](around:RADIUS,LAT,LON);way["leisure"="park"](around:RADIUS,LAT,LON);` },
-  { key: "school", label: "Kool lähedal", query: `node["amenity"~"^(school|kindergarten|college)$"](around:RADIUS,LAT,LON);way["amenity"~"^(school|kindergarten|college)$"](around:RADIUS,LAT,LON);` },
-  { key: "gym", label: "Spordisaal lähedal", query: `node["leisure"="fitness_centre"](around:RADIUS,LAT,LON);way["leisure"="fitness_centre"](around:RADIUS,LAT,LON);node["sport"="gym"](around:RADIUS,LAT,LON);` },
-  { key: "transit", label: "Ühistransport", query: `node["public_transport"="platform"](around:RADIUS,LAT,LON);node["highway"="bus_stop"](around:RADIUS,LAT,LON);node["railway"="station"](around:RADIUS,LAT,LON);node["railway"="tram_stop"](around:RADIUS,LAT,LON);` },
-  { key: "shop", label: "Pood lähedal", query: `node["shop"~"^(supermarket|convenience)$"](around:RADIUS,LAT,LON);way["shop"~"^(supermarket|convenience)$"](around:RADIUS,LAT,LON);` },
-  { key: "cafe", label: "Kohvik lähedal", query: `node["amenity"="cafe"](around:RADIUS,LAT,LON);way["amenity"="cafe"](around:RADIUS,LAT,LON);` },
-  { key: "restaurant", label: "Restoran lähedal", query: `node["amenity"="restaurant"](around:RADIUS,LAT,LON);way["amenity"="restaurant"](around:RADIUS,LAT,LON);` },
+// Tag-bucket rules. Each rule says "if an element's tags satisfy the
+// predicate, count it under this key". We use this to bucket the
+// flat union of all categories into per-category counts.
+const POI_RULES: { key: string; match: (t: Record<string, string>) => boolean }[] = [
+  { key: "park",       match: (t) => t.leisure === "park" },
+  { key: "school",     match: (t) => t.amenity === "school" || t.amenity === "kindergarten" || t.amenity === "college" },
+  { key: "gym",        match: (t) => t.leisure === "fitness_centre" || t.sport === "gym" },
+  { key: "transit",    match: (t) => t.public_transport === "platform" || t.highway === "bus_stop" || t.railway === "station" || t.railway === "tram_stop" },
+  { key: "shop",       match: (t) => t.shop === "supermarket" || t.shop === "convenience" },
+  { key: "cafe",       match: (t) => t.amenity === "cafe" },
+  { key: "restaurant", match: (t) => t.amenity === "restaurant" },
 ];
 
 function scoreFromCount(n: number): { stars: number; label: string } {
-  // Convert count to 1–5 stars with a sensible curve
-  // 0 → 1, 1–2 → 2, 3–5 → 3, 6–10 → 4, 11+ → 5
   if (n <= 0) return { stars: 1, label: "ei leitud" };
   if (n <= 2) return { stars: 2, label: `${n} lähedal` };
   if (n <= 5) return { stars: 3, label: `${n} lähedal` };
@@ -36,63 +47,99 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "lat ja lon on kohustuslikud" }, { status: 400 });
   }
 
-  // Build one big Overpass query — each subquery in its own union block
-  // separated by `;`. (The previous attempt of joining `(...)(...)` was
-  // rejected as a parse error by the overpass.osm.ch backend.)
-  const blocks = POI_QUERIES.map(
-    (p) =>
-      `(${p.query.replace("RADIUS", String(radius)).replace("LAT", String(lat)).replace("LON", String(lon))});`,
-  ).join("");
+  // Single combined Overpass query — one union of all categories, then
+  // `out tags center;` so we get individual elements with tags and can
+  // bucket them ourselves. ~3-8s on a fresh request.
+  const q = `[out:json][timeout:15];
+(nwr["leisure"="park"](around:${radius},${lat},${lon});
+nwr["amenity"~"^(school|kindergarten|college)$"](around:${radius},${lat},${lon});
+nwr["leisure"="fitness_centre"](around:${radius},${lat},${lon});
+nwr["sport"="gym"](around:${radius},${lat},${lon});
+nwr["public_transport"="platform"](around:${radius},${lat},${lon});
+nwr["highway"="bus_stop"](around:${radius},${lat},${lon});
+nwr["railway"~"^(station|tram_stop)$"](around:${radius},${lat},${lon});
+nwr["shop"~"^(supermarket|convenience)$"](around:${radius},${lat},${lon});
+nwr["amenity"="cafe"](around:${radius},${lat},${lon});
+nwr["amenity"="restaurant"](around:${radius},${lat},${lon}););
+out tags center;`;
 
-  const q = `[out:json][timeout:15];${blocks}out tags center;`;
-
-  try {
-    const r = await fetch(OVERPASS, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain", "User-Agent": "vordlus/0.2 (vordlus.vercel.app)" },
-      body: q,
-    });
-    if (!r.ok) {
-      return NextResponse.json({ error: `Overpass ${r.status}` }, { status: r.status });
+  let elements: { tags?: Record<string, string> }[] = [];
+  let usedMirror = "";
+  let lastErr = "";
+  for (const mirror of OVERPASS_MIRRORS) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 12_000);
+    const t0 = Date.now();
+    try {
+      const r = await fetch(mirror, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain",
+          "User-Agent": "vordlus/0.3 (vordlus.vercel.app; contact: hello@vordlus.app)",
+        },
+        body: q,
+        signal: ac.signal,
+      });
+      clearTimeout(t);
+      if (!r.ok) {
+        lastErr = `Overpass ${r.status}`;
+        continue;
+      }
+      const j = (await r.json()) as { elements?: { tags?: Record<string, string> }[] };
+      const got = j.elements ?? [];
+      const ms = Date.now() - t0;
+      // If empty + not last mirror, this mirror is probably stale — try next.
+      if (got.length === 0 && mirror !== OVERPASS_MIRRORS[OVERPASS_MIRRORS.length - 1]) {
+        console.log(`[poi] ${mirror} returned 0 in ${ms}ms, trying next mirror`);
+        continue;
+      }
+      console.log(`[poi] ${mirror} ok in ${ms}ms, ${got.length} elements`);
+      elements = got;
+      usedMirror = mirror;
+      break;
+    } catch (e) {
+      clearTimeout(t);
+      const ms = Date.now() - t0;
+      lastErr = (e as Error).message;
+      console.log(`[poi] ${mirror} ERR in ${ms}ms: ${lastErr}`);
+      continue;
     }
-    const j = await r.json();
-    const elements = j.elements ?? [];
-
-    // Group by tag-key
-    // Each element has its tags; we count by matching which query produced it.
-    // Overpass doesn't tell us which sub-query matched, so we bucket by tag presence.
-    const result: Record<string, { count: number; stars: number; label: string }> = {};
-    for (const poi of POI_QUERIES) {
-      result[poi.key] = { count: 0, stars: 1, label: "ei leitud" };
-    }
-
-    for (const el of elements) {
-      const tags = el.tags ?? {};
-      if (tags.leisure === "park") result.park.count++;
-      else if (tags.amenity === "school" || tags.amenity === "kindergarten" || tags.amenity === "college") result.school.count++;
-      else if (tags.leisure === "fitness_centre" || tags.sport === "gym") result.gym.count++;
-      else if (tags.public_transport === "platform" || tags.highway === "bus_stop" || tags.railway === "station" || tags.railway === "tram_stop") result.transit.count++;
-      else if (tags.shop === "supermarket" || tags.shop === "convenience") result.shop.count++;
-      else if (tags.amenity === "cafe") result.cafe.count++;
-      else if (tags.amenity === "restaurant") result.restaurant.count++;
-    }
-
-    for (const k of Object.keys(result)) {
-      const s = scoreFromCount(result[k].count);
-      result[k].stars = s.stars;
-      result[k].label = s.label;
-    }
-
-    return NextResponse.json(
-      {
-        lat,
-        lon,
-        radius,
-        pois: result,
-      },
-      { headers: { "Cache-Control": "public, s-maxage=86400, stale-while-revalidate=604800" } },
-    );
-  } catch (e) {
-    return NextResponse.json({ error: (e as Error).message }, { status: 502 });
   }
+
+  // Bucket by category. Each element goes into the first matching rule.
+  // Multi-tag elements (e.g. a bus stop with shop=convenience) count once
+  // for the first matching rule, which is fine.
+  const counts: Record<string, number> = {};
+  for (const r of POI_RULES) counts[r.key] = 0;
+  for (const el of elements) {
+    const tags = el.tags ?? {};
+    for (const r of POI_RULES) {
+      if (r.match(tags)) {
+        counts[r.key]++;
+        break;
+      }
+    }
+  }
+
+  const result: Record<string, { count: number; stars: number; label: string }> = {};
+  for (const r of POI_RULES) {
+    const total = counts[r.key];
+    result[r.key] = {
+      count: total,
+      stars: scoreFromCount(total).stars,
+      label: scoreFromCount(total).label,
+    };
+  }
+
+  return NextResponse.json(
+    {
+      lat,
+      lon,
+      radius,
+      pois: result,
+      source: usedMirror || null,
+      warning: usedMirror ? null : (lastErr || "Overpass unreachable; showing 0 counts"),
+    },
+    { headers: { "Cache-Control": "public, s-maxage=86400, stale-while-revalidate=604800" } },
+  );
 }

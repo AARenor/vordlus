@@ -90,19 +90,35 @@ export async function POST(req: NextRequest) {
       const query = parsed.address;
       if (!query) {
         errors.push(
-          "Sellelt lingilt ei saanud aadressi kätte. Kleesti aadress käsitsi.",
+          "Sellelt lingilt ei saanud aadressi kätte. Kleesti aadress käsitsi (nt 'Viljandi mnt 47, Tallinn').",
         );
       } else {
-        try {
-          const results = await searchAddresses(query);
-          if (results.length === 0) {
-            errors.push("Aadressile ei leitud vastet");
-          } else {
-            const m = results.find((x) => x.liik === "E") || results[0];
-            addr = m;
+        // Try multiple In-AKS query forms — the official gazetteer is fussy
+        // about district names. Drop the district, then drop the city.
+        const queries = [query];
+        const parts = query.split(",").map((s) => s.trim());
+        if (parts.length >= 3) queries.push(parts.slice(0, 2).join(", "));  // drop district
+        if (parts.length >= 2) queries.push(parts[0]);                       // street only
+        // Dedupe while preserving order
+        const seen = new Set<string>();
+        const uniq = queries.filter((q) => q && !seen.has(q) && seen.add(q));
+        let results: AksAddress[] = [];
+        for (const q of uniq) {
+          try {
+            const r = await searchAddresses(q);
+            if (r.length > 0) {
+              results = r;
+              break;
+            }
+          } catch (e) {
+            errors.push(`In-AKS (${q}): ${(e as Error).message}`);
           }
-        } catch (e) {
-          errors.push(`In-AKS: ${(e as Error).message}`);
+        }
+        if (results.length === 0) {
+          errors.push(`Aadressile "${query}" ei leitud vastet. Proovi linnanimeta (nt "${parts[0] ?? query}").`);
+        } else {
+          const m = results.find((x) => x.liik === "E") || results[0];
+          addr = m;
         }
       }
 

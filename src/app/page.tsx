@@ -72,17 +72,12 @@ export default function Home() {
     saveCompare(columns);
   }, [columns, ready]);
 
-  // Price per m² helper
+  // Price per m² helper — only from manualPrice + manualArea
   const pricePerM2Of = (col: CompareColumn): number | null => {
-    if (col.input.manualPrice != null) {
-      const a = col.input.manualArea;
-      return a && a > 0 ? col.input.manualPrice / a : null;
+    if (col.input.manualPrice != null && col.input.manualArea != null && col.input.manualArea > 0) {
+      return col.input.manualPrice / col.input.manualArea;
     }
-    const c = col.cadastre;
-    const e = col.ehr;
-    const price = c?.maks_hind ?? null;
-    const area = e?.suletud_netopind ?? c?.pindala ?? null;
-    return price != null && area && area > 0 ? price / area : null;
+    return null;
   };
 
   // Filtered set — pre-compute price/area for filtering
@@ -90,9 +85,13 @@ export default function Home() {
     return columns.filter((col) => {
       const c = col.cadastre;
       const e = col.ehr;
-      const price = col.input.manualPrice ?? c?.maks_hind ?? null;
-      const area = col.input.manualArea ?? e?.suletud_netopind ?? c?.pindala ?? null;
-      const rooms = col.input.manualRooms ?? e?.tubadeArv ?? null;
+      // For filtering we want the user's input if available, otherwise
+      // building-level data (single-unit only).
+      const nimetus = e?.nimetus?.toLowerCase() ?? "";
+      const isMulti = nimetus.includes("korterelamu") || nimetus.includes("korter");
+      const price = col.input.manualPrice ?? null;
+      const area = col.input.manualArea ?? (isMulti ? null : e?.suletud_netopind ?? null);
+      const rooms = col.input.manualRooms ?? (isMulti ? null : e?.tubadeArv ?? null);
       const energy = e?.energy[0]?.energiaKlass ?? null;
       if (filters.priceMin != null && price != null && price < filters.priceMin) return false;
       if (filters.priceMax != null && price != null && price > filters.priceMax) return false;
@@ -131,6 +130,7 @@ export default function Home() {
         lifestyle: col.lifestyle,
         marketMedian: medianPriceM2,
         pricePerM2Override: pricePerM2Of(col),
+        unitArea: col.input.manualArea ?? null,
       });
       return { ...col, scores: liveScores };
     });
@@ -170,6 +170,7 @@ export default function Home() {
           lifestyle,
           marketMedian: null,
           pricePerM2Override: null,
+          unitArea: manual?.area ?? null,
         }),
         fetchedAt: Date.now(),
         errors: j.errors,
@@ -314,13 +315,24 @@ export default function Home() {
 
             {filteredWithScores.length === 0 ? (
               <EmptyState onTryExample={async () => {
-                const examples = [
-                  "Viljandi mnt 47, Tallinn",
-                  "Mustamäe tee 51, Tallinn",
-                  "Tartu mnt 84a, Tallinn",
+                // Realistic 2025–2026 Estonian listing examples with actual
+                // market prices. These cover three different building types:
+                //   - 70s üksikelamu (single-family, expensive per m²)
+                //   - 60s korterelamu (soviet-era apartment, typical)
+                //   - 30s korterelamu (pre-war, central)
+                const examples: { raw: string; price: number; area: number; rooms: number }[] = [
+                  // Viljandi 47, Nõmme — 199 m² üksikelamu, 1970, D-energy.
+                  // 2026 market ~€420k
+                  { raw: "Viljandi mnt 47, Tallinn", price: 420000, area: 199, rooms: 5 },
+                  // Pärnu mnt 28 — 6-korruseline korterelamu, 1937.
+                  // Typical 2-toaline ~55 m², ~€220k
+                  { raw: "Pärnu mnt 28, Tallinn", price: 220000, area: 55, rooms: 2 },
+                  // Tartu mnt 84a — suur korterelamu Kesklinnas, 1930.
+                  // Typical 3-toaline ~75 m², ~€310k
+                  { raw: "Tartu mnt 84a, Tallinn", price: 310000, area: 75, rooms: 3 },
                 ];
-                for (const raw of examples) {
-                  await resolveSlot(raw);
+                for (const ex of examples) {
+                  await resolveSlot(ex.raw, { price: ex.price, area: ex.area, rooms: ex.rooms });
                 }
               }} />
             ) : (

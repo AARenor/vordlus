@@ -234,20 +234,25 @@ export function computeScores(opts: {
   lifestyle: Lifestyle;
   marketMedian: number | null;
   pricePerM2Override?: number | null;
+  // The user's actual unit area (for TCO), not the building's net area.
+  unitArea?: number | null;
 }): PropertyScores {
-  const { c, e, lifestyle, marketMedian, pricePerM2Override } = opts;
+  const { c, e, lifestyle, marketMedian, pricePerM2Override, unitArea } = opts;
   const energy = e?.energy[0] ?? null;
   const buildYear = e?.esmaneKasutus
     ? parseInt(e.esmaneKasutus, 10)
     : e?.ehAlustKp
       ? parseInt(String(e.ehAlustKp).slice(0, 4), 10)
       : null;
-  const pricePerM2 = pricePerM2Override != null
-    ? pricePerM2Override
-    : (c?.maks_hind != null && c.pindala > 0) ? c.maks_hind / c.pindala : null;
+  // Price-per-m²: ALWAYS from the user's manualPrice/manualArea when given.
+  // Never fall back to maks_hind/pindala (that's the 2022 tax per parcel).
+  const pricePerM2 = pricePerM2Override != null ? pricePerM2Override : null;
 
-  const fairValue = fairValueScore(pricePerM2, marketMedian, c?.maks_hind ?? null, c?.pindala ?? null);
-  const tco = tcoScore(energy?.energiaKlass ?? null, energy?.energiaKaalKasutus ? Number(energy.energiaKaalKasutus) : null, e?.suletud_netopind ?? null);
+  // TCO area: user's unit area, not the building's total
+  const tcoArea = unitArea ?? null;
+
+  const fairValue = fairValueScore(pricePerM2, marketMedian, c?.maks_hind ?? null, tcoArea);
+  const tco = tcoScore(energy?.energiaKlass ?? null, energy?.energiaKaalKasutus ? Number(energy.energiaKaalKasutus) : null, tcoArea);
   const appreciation = appreciationScore(buildYear, energy?.energiaKlass ?? null);
   const lifestyleS = lifestyleScore(lifestyle);
 
