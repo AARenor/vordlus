@@ -43,7 +43,15 @@ export default function Home() {
           input: { raw },
           cadastre: null,
           ehr: null,
-          lifestyle: { park: 0, school: 0, gym: 0, transit: 0, shop: 0, quiet: 0 },
+          lifestyle: {
+            park: { stars: 0, label: "—", count: 0 },
+            school: { stars: 0, label: "—", count: 0 },
+            gym: { stars: 0, label: "—", count: 0 },
+            transit: { stars: 0, label: "—", count: 0 },
+            shop: { stars: 0, label: "—", count: 0 },
+            cafe: { stars: 0, label: "—", count: 0 },
+            restaurant: { stars: 0, label: "—", count: 0 },
+          },
           fetchedAt: 0,
           errors: [],
         }));
@@ -76,17 +84,13 @@ export default function Home() {
       if (filters.areaMin != null && area != null && area < filters.areaMin) return false;
       if (filters.areaMax != null && area != null && area > filters.areaMax) return false;
       if (filters.roomsMin != null && rooms != null && rooms < filters.roomsMin) return false;
-      if (filters.roomsMax != null && rooms != null && rooms > filters.roomsMax) return false;
-      if (filters.county) {
-        const addr = c?.tais_aadress || e?.taisaadress || col.input.raw;
-        if (!addr?.toLowerCase().includes(filters.county.toLowerCase())) return false;
-      }
-      if (filters.energyClass?.length) {
-        if (!energy || !filters.energyClass.includes(energy)) return false;
+      if (filters.energy?.length) {
+        if (!energy || !filters.energy.includes(energy)) return false;
       }
       if (filters.lifestyle?.length) {
         for (const k of filters.lifestyle) {
-          if ((col.lifestyle[k as keyof typeof col.lifestyle] ?? 0) < 3) return false;
+          const v = col.lifestyle[k as keyof typeof col.lifestyle];
+          if (!v || v.stars < 3) return false;
         }
       }
       return true;
@@ -236,10 +240,15 @@ export default function Home() {
 
       {/* ============== GRID ============== */}
       <section className="max-w-compare mx-auto px-5 sm:px-8 py-8 lg:py-12">
-        <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
-          <FilterSidebar filters={filters} onChange={setFilters} matchCount={filtered.length} />
+          <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
+            <FilterSidebar
+              filters={filters}
+              onChange={setFilters}
+              matchCount={filtered.length}
+              totalCount={columns.length}
+            />
 
-          <div className="flex-1 min-w-0 w-full">
+            <div className="flex-1 min-w-0 w-full">
             {/* Slots row — always shows up to 5 */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
               {Array.from({ length: MAX_SLOTS }).map((_, i) => (

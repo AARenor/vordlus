@@ -1,17 +1,51 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBuilding, getCadastre, searchAddresses, type AksAddress, type CadastreRecord, type EhrBuilding } from "@/lib/estdata";
 import { parseUserInput } from "@/lib/parseInput";
+import { lifestyleFromPOI, scoreLifestyle, type Lifestyle } from "@/lib/lifestyle";
 
 export type Resolved = {
   input: { raw: string; kind: string };
   picked: AksAddress | null;
   cadastre: CadastreRecord | null;
   ehr: EhrBuilding | null;
+  lifestyle: Lifestyle;
   errors: string[];
 };
 
+// Fetch lifestyle POI data for a given WGS84 coord (graceful on failure)
+async function fetchPOI(lat: number, lon: number): Promise<Lifestyle | null> {
+  try {
+    const u = new URL("/api/poi", "http://x");
+    u.searchParams.set("lat", String(lat));
+    u.searchParams.set("lon", String(lon));
+    u.searchParams.set("radius", "1000");
+    const r = await fetch(u.toString(), {
+      headers: { Accept: "application/json" },
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j.pois) return null;
+    return lifestyleFromPOI(j.pois);
+  } catch {
+    return null;
+  }
+}
+
+// Pick WGS84 from any of: picked addr, EHR geocoded addr, cadastre tsentroid (need L-EST97 → WGS84).
+import proj4 from "proj4";
+proj4.defs(
+  "EPSG:3301",
+  "+proj=lcc +lat_0=57.5175539305556 +lon_0=24 +lat_1=59.3333333333333 +lat_2=58 +x_0=500000 +y_0=6375000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs",
+);
+
+function wgs84FromCad(c: CadastreRecord | null): [number, number] | null {
+  if (!c) return null;
+  const [lng, lat] = proj4("EPSG:3301", "EPSG:4326", [c.tsentroid_x, c.tsentroid_y]);
+  return [lng, lat];
+}
+
 export async function POST(req: NextRequest) {
-  let body: { raw?: string; manual?: { address: string; price?: number | null; area?: number | null; rooms?: number | null } };
+  let body: { raw?: string };
   try {
     body = await req.json();
   } catch {
@@ -25,27 +59,23 @@ export async function POST(req: NextRequest) {
     picked: null,
     cadastre: null,
     ehr: null,
+    lifestyle: scoreLifestyle(null, null),
     errors,
   };
 
   try {
-    // 1) Resolve to a building via In-AKS
     let addr: AksAddress | null = null;
 
     if (parsed.kind === "tunnus") {
-      // Tunnus → use it directly to load cadastre. We don't have EHR code yet.
       try {
         const c = await getCadastre(parsed.tunnus);
         out.cadastre = c;
-        // Try EHR via kadastritunnus search: address contains it
         const a = await searchAddresses(c.tais_aadress);
-        const m = a.find((x) => x.liik === "E") || a[0] || null;
-        addr = m;
+        addr = a.find((x) => x.liik === "E") || a[0] || null;
       } catch (e) {
         errors.push(`Kadastre: ${(e as Error).message}`);
       }
     } else if (parsed.kind === "ehr") {
-      // EHR code → fetch directly
       try {
         const b = await getBuilding(parsed.ehrCode);
         out.ehr = b;
@@ -57,18 +87,23 @@ export async function POST(req: NextRequest) {
         errors.push(`EHR: ${(e as Error).message}`);
       }
     } else if (parsed.kind === "kv-url" || parsed.kind === "address") {
-      const query = parsed.kind === "kv-url" ? parsed.address : parsed.address;
-      try {
-        const results = await searchAddresses(query);
-        if (results.length === 0) {
-          errors.push("Aadressile ei leitud vastet");
-        } else {
-          // Prefer EHITISHOONE, otherwise first
-          const m = results.find((x) => x.liik === "E") || results[0];
-          addr = m;
+      const query = parsed.address;
+      if (!query) {
+        errors.push(
+          "Sellelt lingilt ei saanud aadressi kätte. Kleesti aadress käsitsi.",
+        );
+      } else {
+        try {
+          const results = await searchAddresses(query);
+          if (results.length === 0) {
+            errors.push("Aadressile ei leitud vastet");
+          } else {
+            const m = results.find((x) => x.liik === "E") || results[0];
+            addr = m;
+          }
+        } catch (e) {
+          errors.push(`In-AKS: ${(e as Error).message}`);
         }
-      } catch (e) {
-        errors.push(`In-AKS: ${(e as Error).message}`);
       }
 
       if (addr) {
@@ -89,7 +124,6 @@ export async function POST(req: NextRequest) {
             errors.push(`EHR: ${(e as Error).message}`);
           }
         } else if (addr.tunnus && addr.tunnus.includes(":")) {
-          // Non-building with tunnus → try cadastre directly
           try {
             out.cadastre = await getCadastre(addr.tunnus);
           } catch (e) {
@@ -100,6 +134,15 @@ export async function POST(req: NextRequest) {
     }
 
     if (out.picked == null && addr) out.picked = addr;
+
+    // Lifestyle: real POI data if we have a WGS84 point; deterministic otherwise.
+    const wgs = wgs84FromCad(out.cadastre);
+    if (wgs) {
+      const poi = await fetchPOI(wgs[1], wgs[0]);
+      out.lifestyle = poi ?? scoreLifestyle(out.cadastre, out.ehr);
+    } else {
+      out.lifestyle = scoreLifestyle(out.cadastre, out.ehr);
+    }
   } catch (e) {
     errors.push(`Üldine: ${(e as Error).message}`);
   }

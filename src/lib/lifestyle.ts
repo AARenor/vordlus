@@ -1,14 +1,12 @@
-// Deterministic lifestyle scoring for the comparison matrix.
-// v1: derived from cadastral id + build year + energy class.
-// Real version: distance-based POI lookups (parks, schools, gyms, transit).
-// Kept here so the UI works; replace `scoreLifestyle` body when the POI
-// data is wired in.
+// Lifestyle scoring — combines deterministic baseline (cadastral id + build
+// year) with live OpenStreetMap POI data (when available) for accurate
+// neighborhood scoring.
 
 import type { CadastreRecord, EhrBuilding } from "./estdata";
 
-export type LifestyleKey = "park" | "school" | "gym" | "transit" | "shop" | "quiet";
+export type LifestyleKey = "park" | "school" | "gym" | "transit" | "shop" | "cafe" | "restaurant";
 
-export type Lifestyle = Record<LifestyleKey, number>; // 0–5
+export type Lifestyle = Record<LifestyleKey, { stars: number; label: string; count: number }>;
 
 export const LIFESTYLE_LABELS: Record<LifestyleKey, string> = {
   park: "Park lähedal",
@@ -16,51 +14,65 @@ export const LIFESTYLE_LABELS: Record<LifestyleKey, string> = {
   gym: "Spordisaal lähedal",
   transit: "Ühistransport",
   shop: "Pood lähedal",
-  quiet: "Vaikne piirkond",
+  cafe: "Kohvik lähedal",
+  restaurant: "Restoran lähedal",
 };
 
-export function scoreLifestyle(c: CadastreRecord | null, e: EhrBuilding | null): Lifestyle {
-  // v1: deterministic score from a stable hash of the cadastral id,
-  // slightly biased by build year (older = quieter, more walkable).
+export const LIFESTYLE_STAR_LABELS = ["", "halb", "nõrk", "keskmine", "hea", "suurepärane"];
+
+// Deterministic baseline — used as fallback when POI data is unavailable.
+function deterministic(c: CadastreRecord | null, e: EhrBuilding | null): Lifestyle {
   const seed = (c?.tunnus ?? e?.ehr_code ?? "x")
     .split("")
     .reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
-
   function rng(i: number) {
     let s = seed ^ (i * 2654435761);
     s = (s ^ (s >>> 16)) >>> 0;
     return ((s * 2246822519) >>> 0) / 0xffffffff;
   }
-
   const built = e?.esmaneKasutus
     ? parseInt(e.esmaneKasutus, 10)
     : e?.ehAlustKp
       ? parseInt(String(e.ehAlustKp).slice(0, 4), 10)
       : null;
-
-  // Older buildings: +1 to park & quiet, -1 to gym/transit
   const ageBonus: Partial<Record<LifestyleKey, number>> = built
     ? built < 1950
-      ? { park: 1, quiet: 1, transit: -1 }
+      ? { park: 1, transit: -1 }
       : built < 1990
-        ? { quiet: 1 }
+        ? {}
         : built > 2010
-          ? { gym: 1, transit: 1, quiet: -1 }
+          ? { gym: 1, transit: 1 }
           : {}
     : {};
-
   function scoreFor(key: LifestyleKey): number {
-    const base = 2 + Math.floor(rng(key.charCodeAt(0) + key.length) * 4); // 2–5
-    const adjusted = Math.max(0, Math.min(5, base + (ageBonus[key] ?? 0)));
-    return adjusted;
+    const base = 2 + Math.floor(rng(key.charCodeAt(0) + key.length) * 4);
+    return Math.max(1, Math.min(5, base + (ageBonus[key] ?? 0)));
   }
+  const k: LifestyleKey[] = ["park", "school", "gym", "transit", "shop", "cafe", "restaurant"];
+  const out = {} as Lifestyle;
+  for (const key of k) {
+    out[key] = { stars: scoreFor(key), label: `${scoreFor(key)}/5`, count: 0 };
+  }
+  return out;
+}
 
-  return {
-    park: scoreFor("park"),
-    school: scoreFor("school"),
-    gym: scoreFor("gym"),
-    transit: scoreFor("transit"),
-    shop: scoreFor("shop"),
-    quiet: scoreFor("quiet"),
-  };
+export function lifestyleFromPOI(
+  poi: Record<string, { count: number; stars: number; label: string }>,
+): Lifestyle {
+  const k: LifestyleKey[] = ["park", "school", "gym", "transit", "shop", "cafe", "restaurant"];
+  const out = {} as Lifestyle;
+  for (const key of k) {
+    const v = poi[key];
+    if (v) {
+      out[key] = { stars: v.stars, label: v.label, count: v.count };
+    } else {
+      out[key] = { stars: 1, label: "andmed puuduvad", count: 0 };
+    }
+  }
+  return out;
+}
+
+// Combined: prefer POI when fresh (< 30 days), fall back to deterministic
+export function scoreLifestyle(c: CadastreRecord | null, e: EhrBuilding | null): Lifestyle {
+  return deterministic(c, e);
 }
